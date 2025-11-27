@@ -1,0 +1,126 @@
+blueprint:
+  name: Adaptive Lichttemperatur nach Sonnenstand
+  description: >
+    Passt die Farbtemperatur (Kelvin) deiner Lichter automatisch an den Sonnenstand an.
+    Morgens kalt (6500K), abends warm (2200K). Verwendet eine sanfte Kurve basierend
+    auf der Sonnenelevation für natürliche Übergänge.
+  domain: automation
+  input:
+    target_lights:
+      name: Ziel-Lichter
+      description: Die Lichter, deren Farbtemperatur angepasst werden soll
+      selector:
+        target:
+          entity:
+            domain: light
+    min_kelvin:
+      name: Minimale Farbtemperatur (warm)
+      description: Wärmste Farbtemperatur in Kelvin (Abend/Nacht)
+      default: 2200
+      selector:
+        number:
+          min: 1800
+          max: 4000
+          unit_of_measurement: K
+    max_kelvin:
+      name: Maximale Farbtemperatur (kalt)
+      description: Kälteste Farbtemperatur in Kelvin (Mittag)
+      default: 6500
+      selector:
+        number:
+          min: 4000
+          max: 10000
+          unit_of_measurement: K
+    transition_time:
+      name: Übergangszeit
+      description: Zeit für den sanften Übergang in Sekunden
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: s
+    only_when_on:
+      name: Nur wenn Licht an
+      description: Nur anpassen, wenn das Licht bereits eingeschaltet ist
+      default: true
+      selector:
+        boolean:
+
+trigger:
+  - platform: time_pattern
+    minutes: "/1"
+
+condition:
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ not only_when_on }}"
+      - condition: template
+        value_template: >
+          {% set only_when_on = only_when_on | default(true) %}
+          {% if not only_when_on %}
+            true
+          {% else %}
+            {% set lights = target_lights.entity_id if target_lights.entity_id is defined else [] %}
+            {% set lights = [lights] if lights is string else lights %}
+            {% set ns = namespace(any_on=false) %}
+            {% for light in lights %}
+              {% if states(light) == 'on' %}
+                {% set ns.any_on = true %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.any_on }}
+          {% endif %}
+
+variables:
+  only_when_on: !input only_when_on
+  target_lights: !input target_lights
+  min_kelvin: !input min_kelvin
+  max_kelvin: !input max_kelvin
+  transition_time: !input transition_time
+  
+  # Sonnenelevation aus dem sun.sun Entity
+  sun_elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
+  
+  # Berechnung der Farbtemperatur basierend auf Sonnenelevation
+  # Verwendet eine Sigmoid-ähnliche Kurve für natürliche Übergänge
+  calculated_kelvin: >
+    {% set elevation = sun_elevation %}
+    {% set min_k = min_kelvin | int %}
+    {% set max_k = max_kelvin | int %}
+    
+    {# Elevation ranges: -90 (Mitternacht) bis +90 (Zenit) #}
+    {# Wir nutzen -18° bis +45° als relevanten Bereich #}
+    
+    {% if elevation <= -18 %}
+      {# Tiefe Nacht: wärmste Temperatur #}
+      {{ min_k }}
+    {% elif elevation >= 45 %}
+      {# Hoher Sonnenstand: kälteste Temperatur #}
+      {{ max_k }}
+    {% else %}
+      {# Sigmoid-Kurve für sanften Übergang #}
+      {# Normalisiere elevation auf 0-1 Bereich #}
+      {% set normalized = (elevation + 18) / 63 %}
+      
+      {# Sigmoid-Transformation für natürlichere Kurve #}
+      {# Formel: 1 / (1 + e^(-k*(x-0.5))) mit k=8 für sanfte S-Kurve #}
+      {% set sigmoid_input = (normalized - 0.5) * 8 %}
+      {% set e_val = 2.71828 %}
+      {% set sigmoid = 1 / (1 + (e_val ** (-sigmoid_input))) %}
+      
+      {# Interpoliere zwischen min und max Kelvin #}
+      {% set kelvin = min_k + (sigmoid * (max_k - min_k)) %}
+      {{ kelvin | round(0) | int }}
+    {% endif %}
+
+action:
+  - service: light.turn_on
+    target: !input target_lights
+    data:
+      color_temp_kelvin: "{{ calculated_kelvin }}"
+      transition: "{{ transition_time }}"
+
+mode: single
+max_exceeded: silent
