@@ -38,7 +38,7 @@ blueprint:
       selector:
         number:
           min: 0
-          max: 30
+          max: 300
           unit_of_measurement: s
     only_when_on:
       name: Nur wenn Licht an
@@ -116,11 +116,35 @@ variables:
     {% endif %}
 
 action:
-  - service: light.turn_on
-    target: !input target_lights
-    data:
-      color_temp_kelvin: "{{ calculated_kelvin }}"
-      transition: "{{ transition_time }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ only_when_on }}"
+        sequence:
+          # Nur eingeschaltete Lichter anpassen
+          - repeat:
+              for_each: >
+                {% set lights = target_lights.entity_id if target_lights.entity_id is defined else [] %}
+                {% set lights = [lights] if lights is string else lights %}
+                {{ lights }}
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: "{{ states(repeat.item) == 'on' }}"
+                  then:
+                    - service: light.turn_on
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        color_temp_kelvin: "{{ calculated_kelvin }}"
+                        transition: "{{ transition_time }}"
+    default:
+      # Alle Lichter anpassen (auch ausgeschaltete einschalten)
+      - service: light.turn_on
+        target: !input target_lights
+        data:
+          color_temp_kelvin: "{{ calculated_kelvin }}"
+          transition: "{{ transition_time }}"
 
 mode: single
 max_exceeded: silent
